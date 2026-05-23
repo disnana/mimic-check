@@ -13,6 +13,7 @@ env:
   COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
   REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
   REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
+  BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
   CATEGORY_SLUG: "package-proposal"
 
 jobs:
@@ -64,12 +65,19 @@ jobs:
                     reactions(first: 100) {
                       nodes {
                         content
+                        user {
+                          login
+                        }
                       }
                     }
                   }
                 }
               }
             }`;
+
+            // 2. ブラックリストの読み込み（カンマまたは改行区切りを綺麗にパース）
+            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
+            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
 
             const discVariables = {
               owner: context.repo.owner,
@@ -104,6 +112,19 @@ jobs:
               let thumbsDown = 0;
               
               for (const reaction of discussion.reactions.nodes) {
+                // 削除済みアカウント（userがnull）なら、最初からカウントせずにスキップ
+                if (!reaction.user) {
+                  console.log(`ℹ️ 削除されたアカウントの投票をスキップしました。`);
+                  continue;
+                }
+            
+                const voter = reaction.user.login.toLowerCase();
+                
+                // 投票者がブラックリストにいたら、カウントをスキップ
+                if (userBlacklist.includes(voter)) {
+                  console.log(`🚫 ブラックリストユーザー ${voter} の投票をスキップしました。`);
+                  continue;
+                }
                 if (reaction.content === 'THUMBS_UP') thumbsUp++;
                 if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
               }
