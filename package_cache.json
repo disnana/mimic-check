@@ -1,0 +1,22 @@
+{
+  "aiohttp": {
+    "downloads": 573047137,
+    "stars": 16443,
+    "date": "2026-05-23"
+  },
+  "audioop-lts": {
+    "downloads": 6869572,
+    "stars": 60,
+    "date": "2026-05-23"
+  },
+  "requests": {
+    "downloads": 1562806177,
+    "stars": 54011,
+    "date": "2026-05-23"
+  },
+  "validkit-py": {
+    "downloads": 1298,
+    "stars": 0,
+    "date": "2026-05-22"
+  }
+}

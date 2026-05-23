@@ -1,0 +1,5 @@
+[mimi]
+min_downloads = 1000
+min_stars = 10
+ci_mode = false
+famous_packages = ["requests", "numpy", "pandas", "flask", "django", "pytest", "discord.py", "boto3"]
