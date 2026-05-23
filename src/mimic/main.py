@@ -11,15 +11,30 @@ import json
 import datetime
 from pathlib import Path
 
-# キャッシュ管理
-DEFAULT_CONFIG = Path(__file__).parent.parent.parent / "config.toml"
-CACHE_FILE = Path(__file__).parent.parent.parent / "package_cache.json"
+# キャッシュと設定の管理
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.toml"
+CACHE_FILE = Path.home() / ".mimic_package_cache.json"
+USER_CONFIG_FILE = Path.home() / ".mimic_config.toml"
+REMOTE_CONFIG_URL = "https://raw.githubusercontent.com/disnana/mimic-check/main/config.toml"
+
+
+def load_remote_config():
+    try:
+        res = requests.get(REMOTE_CONFIG_URL, timeout=5)
+        if res.status_code == 200:
+            return toml.loads(res.text)
+    except Exception:
+        pass
+    return None
 
 
 def load_cache():
     if CACHE_FILE.exists():
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
 
@@ -141,18 +156,56 @@ def analyze_package(pkg_name, config):
 
 
 def main():
+    # WindowsのコンソールでUnicode出力をサポートするための設定
+    if sys.platform == "win32":
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", default="requirements.txt")
-    parser.add_argument("--config", default=str(DEFAULT_CONFIG))
+    parser.add_argument("--config")
     parser.add_argument("--ci", action="store_true")
     args = parser.parse_args()
 
-    try:
-        config = toml.load(args.config)["mimi"]
-    except Exception as e:
-        print(f"Config load error: {e}")
-        print(f"Tried to load: {args.config}")
+    # 設定ファイルの読み込み優先順位:
+    # 1. 引数 --config
+    # 2. ユーザーホームディレクトリの .mimic_config.toml
+    # 3. カレントディレクトリの config.toml
+    # 4. パッケージ同梱のデフォルト config.toml
+
+    # 設定ファイルの読み出し
+    config = None
+    config_path = None
+
+    if args.config:
+        config_path = Path(args.config)
+        if config_path.exists():
+            config = toml.load(config_path)
+    elif USER_CONFIG_FILE.exists():
+        config_path = USER_CONFIG_FILE
+        config = toml.load(config_path)
+    elif Path("config.toml").exists():
+        config_path = Path("config.toml")
+        config = toml.load(config_path)
+
+    # ローカルに見つからない場合はリモート(GitHub)を試行
+    if config is None:
+        config = load_remote_config()
+        if config:
+            config_path = REMOTE_CONFIG_URL
+
+    # リモートもダメなら同梱のデフォルト
+    if config is None:
+        config_path = DEFAULT_CONFIG_PATH
+        if config_path.exists():
+            config = toml.load(config_path)
+
+    if config is None or "mimi" not in config:
+        print(f"Config load error: Could not find valid config")
         sys.exit(1)
+
+    config = config["mimi"]
 
     with open(args.file, "r") as f:
         lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]

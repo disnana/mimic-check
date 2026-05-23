@@ -1,1 +1,4 @@
 .idea/
+src/mimic_check.egg-info/
+*.pyc
+dist/

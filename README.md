@@ -20,16 +20,26 @@
 
 ### インストール
 
+PyPIからインストールする場合（公開後）：
+
 ```bash
-pip install requests build toml
+pip install mimic-check
 ```
+
+ローカルで開発用にインストールする場合：
+
+```bash
+pip install -e .
+```
+
+これにより、`mimi` コマンドが使用可能になります。
 
 ## 使い方
 
 ### 基本的な実行
 
 ```bash
-python src/mimic/main.py --file requirements.txt
+mimi --file requirements.txt
 ```
 
 実行すると、パッケージごとに以下のチェックが行われます：
@@ -44,7 +54,29 @@ python src/mimic/main.py --file requirements.txt
 CI/CD パイプラインなどで、問題検出時に自動的にエラーとしたい場合は `--ci` フラグを使用します。
 
 ```bash
-python src/mimic/main.py --file requirements.txt --ci
+mimi --file requirements.txt --ci
+```
+
+## PyPIへの配布方法
+
+1. ビルドツールのインストール:
+```bash
+pip install build twine
+```
+
+2. パッケージのビルド:
+```bash
+python -m build
+```
+
+3. PyPIへのアップロード (テスト環境):
+```bash
+python -m twine upload --repository testpypi dist/*
+```
+
+4. PyPIへのアップロード (本番環境):
+```bash
+python -m twine upload dist/*
 ```
 
 ## 設定 (`config.toml`)
