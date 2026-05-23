@@ -5,10 +5,9 @@ on:
     - cron: '0 13 * * *'
   workflow_dispatch:
 
-# 以下の権限設定を書き足す
 permissions:
-  discussions: write # Discussionsの読み書き権限（後でClose等をするためwriteを推奨）
-  contents: read     # リポジトリ内のコードを読み取るための標準権限
+  discussions: write
+  contents: read
 
 env:
   REQUIRED_SCORE: 5
@@ -24,19 +23,46 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const query = `query($owner:String!, $name:String!, $slug:String!) {
+            // 1. まずカテゴリのスラッグから、固有の「カテゴリID」を取得する
+            const catQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
-                discussionCategory(slug: $slug) {
-                  discussions(first: 50, states: [OPEN]) {
-                    nodes {
-                      id
-                      title
-                      createdAt
-                      number
-                      reactions(first: 100) {
-                        nodes {
-                          content
-                        }
+                discussionCategories(first: 50) {
+                  nodes {
+                    id
+                    slug
+                  }
+                }
+              }
+            }`;
+
+            const catVariables = {
+              owner: context.repo.owner,
+              name: context.repo.repo
+            };
+
+            const catResult = await github.graphql(catQuery, catVariables);
+            const categories = catResult.repository.discussionCategories.nodes;
+            const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
+
+            if (!targetCategory) {
+              console.log(`❌ カテゴリ "${process.env.CATEGORY_SLUG}" が見つかりませんでした。`);
+              return;
+            }
+
+            const categoryId = targetCategory.id;
+
+            // 2. リポジトリ全体のDiscussionsから、該当カテゴリIDかつOPENなものを取得する
+            const discQuery = `query($owner:String!, $name:String!, $categoryId:ID!) {
+              repository(owner: $owner, name: $name) {
+                discussions(first: 50, categoryId: $categoryId, states: [OPEN]) {
+                  nodes {
+                    id
+                    title
+                    createdAt
+                    number
+                    reactions(first: 100) {
+                      nodes {
+                        content
                       }
                     }
                   }
@@ -44,29 +70,34 @@ jobs:
               }
             }`;
 
-            const variables = {
+            const discVariables = {
               owner: context.repo.owner,
               name: context.repo.repo,
-              slug: process.env.CATEGORY_SLUG
+              categoryId: categoryId
             };
 
-            const result = await github.graphql(query, variables);
-            const discussions = result.repository.discussionCategory.discussions.nodes;
+            const discResult = await github.graphql(discQuery, discVariables);
+            const discussions = discResult.repository.discussions.nodes;
             
             const now = new Date();
             const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 24 * 60 * 60 * 1000;
             const requiredScore = parseInt(process.env.REQUIRED_SCORE);
 
+            if (discussions.length === 0) {
+              console.log("現在検証対象となるOPENな提案はありません。");
+              return;
+            }
+
             for (const discussion of discussions) {
               const createdDate = new Date(discussion.createdAt);
               
-              // 1. 猶予期間（日数）のチェック
+              // 猶予期間（日数）のチェック
               if (now - createdDate < coolingOffPeriod) {
                 console.log(`Discussion #${discussion.number} はまだ猶予期間内です。スキップします。`);
                 continue;
               }
 
-              // 2. 高評価・低評価の集計
+              // 高評価・低評価の集計
               let thumbsUp = 0;
               let thumbsDown = 0;
               
@@ -78,13 +109,11 @@ jobs:
               const score = thumbsUp - thumbsDown;
               console.log(`Discussion #${discussion.number} [${discussion.title}] -> Score: ${score} (👍:${thumbsUp}, 👎:${thumbsDown})`);
 
-              // 3. 判定判定
+              // 判定
               if (score >= requiredScore && thumbsDown === 0) {
                 console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリアしました！`);
-                
-                // ここにWebhook送信ロジックや、DiscussionsをClose、あるいはLabel付与する処理を追加します
-                
+                // TODO: 承認時の処理（Webhookなど）をここに挟む
               } else if (thumbsDown > 0) {
-                console.log(`⚠️ Discussion #${discussion.number} に反対票(👎)があるため、自動処理を凍結します。管理者の目視確認が必要です。`);
+                console.log(`⚠️ Discussion #${discussion.number} に反対票(👎)があるため、自動処理を凍結します。`);
               }
             }
