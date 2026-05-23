@@ -80,7 +80,7 @@ jobs:
             const discussions = discResult.repository.discussions.nodes;
             
             const now = new Date();
-            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 24 * 60 * 60 * 1000;
+            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 86400000;
             const requiredScore = parseInt(process.env.REQUIRED_SCORE);
 
             if (discussions.length === 0) {
