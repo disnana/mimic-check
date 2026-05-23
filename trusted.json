@@ -23,6 +23,14 @@
       "verifiers": [
         "harumaki4649"
       ]
+    },
+    {
+      "name": "aiohttp",
+      "reason": "aiohttpは、世界中で広く普及しているため脆弱性の発見から修正パッチの公開までが非常に早く、Python標準の堅牢な設計をベースにしているため安全です。",
+      "date": "2026-05-23",
+      "verifiers": [
+        "harumaki4649"
+      ]
     }
   ],
   "block_packages": [
