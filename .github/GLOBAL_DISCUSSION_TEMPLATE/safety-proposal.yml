@@ -1,0 +1,30 @@
+name: 安全性認定の提案
+description: コミュニティに新しいパッケージの安全性を提案します
+title: "[提案]: "
+labels: ["proposal"]
+body:
+  - type: input
+    id: package-name
+    attributes:
+      label: パッケージ名
+      placeholder: 例: validkit-py
+    validations:
+      required: true
+
+  - type: dropdown
+    id: safety-status
+    attributes:
+      label: 安全性の評価
+      options:
+        - 安全（ホワイトリスト推奨）
+        - 要注意 / 脆弱性の懸念あり
+    validations:
+      required: true
+
+  - type: textarea
+    id: reason
+    attributes:
+      label: 理由・検証内容
+      placeholder: 依存関係の確認結果や、ソースコードを確認した上での判断理由を書いてください。
+    validations:
+      required: true
