@@ -5,15 +5,23 @@ on:
     - cron: '0 * * * *'
   workflow_dispatch:
 
+concurrency:
+  group: discussion-gatekeeper-pending
+  cancel-in-progress: false
+
 permissions:
   discussions: write
-  contents: read
+  contents: write # pending.json を更新・Pushするために必要
 
 jobs:
   check-proposals:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Open GraphQL Query & Judge
+        id: judge
         uses: actions/github-script@v7
         env:
           COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
@@ -24,6 +32,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
             const repoInfoQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) { nodes { id slug name } }
@@ -51,19 +60,16 @@ jobs:
             const rejectLabelId = labelMap["拒否"];
             
             if (!approveLabelId || !rejectLabelId) {
-              console.log("⚠️ 「承認」または「拒否」ラベルがリポジトリに見つかりません。");
+              console.log("⚠️ 「承認」または「拒否」ラベルが見つかりません。");
               return;
             }
 
-            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
-            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
+            const userBlacklist = (process.env.BLACKLISTED_USERS || "").split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
 
             const discQuery = `query($searchQuery:String!, $cursor:String) {
               search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
-                nodes {
-                  ... on Discussion { id title createdAt number }
-                }
+                nodes { ... on Discussion { id title createdAt number } }
               }
             }`;
 
@@ -79,17 +85,24 @@ jobs:
               hasNextPage = discResult.search.pageInfo.hasNextPage;
               cursor = discResult.search.pageInfo.endCursor;
             }
-            
-            const now = new Date();
-            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS || "3") * 86400000;
-            const requiredScore = parseInt(process.env.REQUIRED_SCORE || "5");
-            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD || "3");
 
             if (allDiscussions.length === 0) {
               console.log("現在検証対象となるOPENな提案はありません。");
               return;
             }
-
+            
+            // pending.json の読み込み
+            const PENDING_FILE = 'pending.json';
+            let pendingData = {};
+            if (fs.existsSync(PENDING_FILE)) {
+              pendingData = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+            }
+            let pendingChanged = false;
+            
+            const now = new Date();
+            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS || "3") * 86400000;
+            const requiredScore = parseInt(process.env.REQUIRED_SCORE || "5");
+            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD || "3");
             const reactionQuery = `query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
               repository(owner: $owner, name: $name) {
                 discussion(number: $number) {
@@ -115,19 +128,13 @@ jobs:
 
               while (hasNextReactionPage) {
                 const reactResult = await github.graphql(reactionQuery, {
-                  owner: context.repo.owner,
-                  name: context.repo.repo,
-                  number: discussion.number,
-                  cursor: reactionCursor
+                  owner: context.repo.owner, name: context.repo.repo, number: discussion.number, cursor: reactionCursor
                 });
-
                 const reactionsData = reactResult.repository.discussion.reactions;
-
                 for (const reaction of reactionsData.nodes) {
                   if (!reaction.user) continue;
                   const voter = reaction.user.login.toLowerCase();
                   if (userBlacklist.includes(voter)) continue;
-
                   if (reaction.content === 'THUMBS_UP') thumbsUp++;
                   if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
                 }
@@ -140,29 +147,44 @@ jobs:
               let actionType = null;
 
               if (score >= requiredScore && thumbsDown < rejectionThreshold) {
-                finalLabelId = approveLabelId;
-                actionType = "承認";
+                finalLabelId = approveLabelId; actionType = "承認";
               } else if (thumbsDown >= rejectionThreshold) {
-                finalLabelId = rejectLabelId;
-                actionType = "拒否";
+                finalLabelId = rejectLabelId; actionType = "拒否";
               }
 
               if (finalLabelId) {
                 console.log(`🎉 Discussion #${discussion.number} を【${actionType}】判定にします。`);
-                
-                // 1. ラベルの付与
                 await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                   addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
                 }`, { id: discussion.id, labelId: finalLabelId });
 
-                // 2. 自動Close (理由を OUTDATED または RESOLVED に)
                 const closeReason = actionType === "承認" ? "RESOLVED" : "OUTDATED";
                 await github.graphql(`mutation($id:ID!, $reason:DiscussionCloseReason!) {
                   closeDiscussion(input: {discussionId: $id, reason: $reason}) { clientMutationId }
                 }`, { id: discussion.id, reason: closeReason });
-
+                
+                // pending.json から削除
+                const discNumStr = discussion.number.toString();
+                if (pendingData[discNumStr]) {
+                  console.log(`🗑️ pending.json から削除: ${pendingData[discNumStr]}`);
+                  delete pendingData[discNumStr];
+                  pendingChanged = true;
+                }
                 console.log(`🔒 #${discussion.number} にラベルを貼り、自動Closeしました。`);
-              } else {
-                console.log(`⏳ Discussion #${discussion.number} は判定保留中です。`);
               }
             }
+
+            if (pendingChanged) {
+              fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingData, null, 2));
+              core.setOutput('should_commit', 'true');
+            }
+
+      - name: Commit and Push pending.json
+        if: steps.judge.outputs.should_commit == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pending.json
+          git commit -m "🤖 chore: remove closed discussions from pending.json"
+          git pull --rebase origin main
+          git push

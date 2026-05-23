@@ -5,6 +5,11 @@ on:
     - cron: '0 13 * * *'
   workflow_dispatch:
 
+# 👇 同時実行を防ぐ設定だけ追加
+concurrency:
+  group: discussion-gatekeeper-pending
+  cancel-in-progress: false
+
 permissions:
   discussions: write
   contents: write
@@ -25,6 +30,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'trusted.json';
+            const PENDING_FILE = 'pending.json'; // 👈 追加: pending.jsonのパス
             
             const repoInfoQuery = `query($owner:String!, $name:String!, $categorySlug:String) {
               repository(owner: $owner, name: $name) {
@@ -125,6 +131,16 @@ jobs:
                 stateData = { trusted_packages: [], block_packages: [] };
               }
             }
+
+            // 👇 追加: pending.json を読み込む
+            let pendingData = {};
+            if (fs.existsSync(PENDING_FILE)) {
+              try {
+                pendingData = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+              } catch (e) {
+                pendingData = {};
+              }
+            }
             
             const todayStr = new Date().toISOString().split('T')[0];
             
@@ -177,9 +193,17 @@ jobs:
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
               }`, { id: discussion.id, labelId: recordedLabel.id });
+
+              // 👇 追加: アーカイブ処理が終わったので、pending.json から削除する
+              const discNumStr = discussion.number.toString();
+              if (pendingData[discNumStr]) {
+                delete pendingData[discNumStr];
+              }
             }
             
             fs.writeFileSync(path, JSON.stringify(stateData, null, 2), 'utf8');
+            // 👇 追加: pending.json を保存
+            fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingData, null, 2), 'utf8');
 
       - name: Commit and Push changes
         run: |
@@ -187,6 +211,10 @@ jobs:
           git config --local user.name "github-actions[bot]"
           if [ -f trusted.json ]; then
             git add trusted.json
-            git commit -m "🤖 chore: update trusted.json with parsed daily consensus [skip ci]" || echo "No changes to commit"
+            if [ -f pending.json ]; then
+              git add pending.json
+            fi
+            git commit -m "🤖 chore: update trusted.json and pending.json with parsed daily consensus [skip ci]" || echo "No changes to commit"
+            git pull --rebase origin main
             git push
           fi
