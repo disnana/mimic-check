@@ -1,0 +1,151 @@
+name: "📦 Daily Consensus Archiver"
+
+on:
+  schedule:
+    - cron: '0 13 * * *' # 毎日22:00（JST）に1回実行
+  workflow_dispatch:
+
+permissions:
+  discussions: write
+  contents: write
+
+jobs:
+  archive-consensus:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Archive Decisions & Commit
+        uses: actions/github-script@v7
+        env:
+          CATEGORY_SLUG: "package-proposal"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = 'trusted.json';
+
+            // 1. カテゴリと「記録済み」ラベルのIDを取得
+            const repoInfoQuery = `query($owner:String!, $name:String!) {
+              repository(owner: $owner, name: $name) {
+                discussionCategories(first: 50) {
+                  nodes { slug name }
+                }
+                labels(first: 100) {
+                  nodes { id name }
+                }
+              }
+            }`;
+
+            const repoInfoResult = await github.graphql(repoInfoQuery, {
+              owner: context.repo.owner,
+              name: context.repo.repo
+            });
+
+            const categories = repoInfoResult.repository.discussionCategories.nodes;
+            const labelsNodes = repoInfoResult.repository.labels.nodes;
+            const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
+
+            if (!targetCategory) {
+              console.log(`❌ カテゴリ "${process.env.CATEGORY_SLUG}" が見つかりませんでした。`);
+              return;
+            }
+
+            const recordedLabel = labelsNodes.find(l => l.name === "記録済み");
+            if (!recordedLabel) {
+              console.log("⚠️ 「記録済み」ラベルがリポジトリに見つかりません。あらかじめ作成しておいてください。");
+              return;
+            }
+
+            // 2. 「承認」または「拒否」ラベルがあるが、まだ「記録済み」ではないものを検索
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:open (label:承認 OR label:拒否) -label:記録済み`;
+            
+            const discQuery = `query($searchQuery:String!, $cursor:String) {
+              search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  ... on Discussion {
+                    id
+                    title
+                    number
+                    labels(first: 10) {
+                      nodes { name }
+                    }
+                  }
+                }
+              }
+            }`;
+
+            let hasNextPage = true;
+            let cursor = null;
+            const targetDiscussions = [];
+
+            while (hasNextPage) {
+              const discResult = await github.graphql(discQuery, { searchQuery, cursor });
+              targetDiscussions.push(...discResult.search.nodes);
+              hasNextPage = discResult.search.pageInfo.hasNextPage;
+              cursor = discResult.search.pageInfo.endCursor;
+            }
+
+            if (targetDiscussions.length === 0) {
+              console.log("本日新しく記録すべき確定済みの提案はありません。");
+              return;
+            }
+
+            // 3. 既存の trusted.json を読み込む（なければ指定の器で初期化）
+            let stateData = { trusted_packages: [], block_packages: [] };
+            if (fs.existsSync(path)) {
+              try {
+                const fileContent = fs.readFileSync(path, 'utf8');
+                stateData = JSON.parse(fileContent);
+                if (!stateData.trusted_packages) stateData.trusted_packages = [];
+                if (!stateData.block_packages) stateData.block_packages = [];
+              } catch (e) {
+                console.log("trusted.json のパースに失敗したため初期化します。");
+              }
+            }
+
+            // 今日の日付を取得 (YYYY-MM-DD)
+            const todayStr = new Date().toISOString().split('T')[0];
+            // この処理を実行した主体（Bot名など）を verifiers に入れる
+            const actorName = context.actor; 
+
+            // 4. データを分類して割り振り ＆ 「記録済み」ラベルを付与
+            for (const discussion of targetDiscussions) {
+              const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
+              
+              // 記録オブジェクトの組み立て
+              const newRecord = {
+                name: discussion.title.trim(), // ディストラクションのタイトルをパッケージ名と仮定
+                reason: `Discussion #${discussion.number} での合意に基づく処理。`,
+                date: todayStr,
+                verifiers: [actorName]
+              };
+
+              if (isApproved) {
+                stateData.trusted_packages.push(newRecord);
+                console.log(`✅ trusted_packages へ追加: ${newRecord.name}`);
+              } else {
+                stateData.block_packages.push(newRecord);
+                console.log(`❌ block_packages へ追加: ${newRecord.name}`);
+              }
+
+              // GitHub側のディスカッションに「記録済み」ラベルを貼る
+              await github.graphql(`mutation($id:ID!, $labelId:ID!) {
+                addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
+              }`, { id: discussion.id, labelId: recordedLabel.id });
+            }
+
+            // 5. 綺麗に整形して trusted.json に保存
+            fs.writeFileSync(path, JSON.stringify(stateData, null, 2), 'utf8');
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          if [ -f trusted.json ]; then
+            git add trusted.json
+            git commit -m "🤖 chore: update trusted.json with daily consensus [skip ci]" || echo "No changes to commit"
+            git push
+          fi
