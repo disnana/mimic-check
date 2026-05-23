@@ -9,13 +9,6 @@ permissions:
   discussions: write
   contents: read
 
-env:
-  COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
-  REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
-  REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
-  BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
-  CATEGORY_SLUG: "package-proposal"
-
 jobs:
   check-proposals:
     runs-on: ubuntu-latest
@@ -24,9 +17,16 @@ jobs:
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # 確実にJS側へ環境変数を引き渡す
+          env:
+            COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
+            REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
+            REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
+            BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
+            CATEGORY_SLUG: "package-proposal"
           script: |
-            // 1. まずカテゴリのスラッグから、固有の「カテゴリID」を取得する
-            const catQuery = `query($owner:String!, $name:String!) {
+            // 1. カテゴリIDとラベルIDを取得
+            const repoInfoQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) {
                   nodes {
@@ -34,16 +34,22 @@ jobs:
                     slug
                   }
                 }
+                labels(first: 100) {
+                  nodes {
+                    id
+                    name
+                  }
+                }
               }
             }`;
 
-            const catVariables = {
+            const repoInfoResult = await github.graphql(repoInfoQuery, {
               owner: context.repo.owner,
               name: context.repo.repo
-            };
+            });
 
-            const catResult = await github.graphql(catQuery, catVariables);
-            const categories = catResult.repository.discussionCategories.nodes;
+            const categories = repoInfoResult.repository.discussionCategories.nodes;
+            const labelsNodes = repoInfoResult.repository.labels.nodes;
             const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
 
             if (!targetCategory) {
@@ -51,23 +57,75 @@ jobs:
               return;
             }
 
-            const categoryId = targetCategory.id;
+            // ラベルIDのマッピング
+            const labelMap = {};
+            labelsNodes.forEach(l => { labelMap[l.name] = l.id; });
+            const approveLabelId = labelMap["承認"];
+            const rejectLabelId = labelMap["拒否"];
+            
+            if (!approveLabelId || !rejectLabelId) {
+              console.log("⚠️ 「承認」または「拒否」ラベルがリポジトリに見つかりません。");
+              return;
+            }
 
-            // 2. リポジトリ全体のDiscussionsから、該当カテゴリIDかつOPENなものを取得する
-            const discQuery = `query($owner:String!, $name:String!, $categoryId:ID!) {
-              repository(owner: $owner, name: $name) {
-                discussions(first: 50, categoryId: $categoryId, states: [OPEN]) {
-                  nodes {
+            // 2. ブラックリストユーザーのパース
+            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
+            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
+
+            // 3. 未処理のDiscussionsを検索（numberをしっかり取得する）
+            const discQuery = `query($searchQuery:String!, $cursor:String) {
+              search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  ... on Discussion {
                     id
                     title
                     createdAt
                     number
-                    reactions(first: 100) {
-                      nodes {
-                        content
-                        user {
-                          login
-                        }
+                  }
+                }
+              }
+            }`;
+
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:${process.env.CATEGORY_SLUG} is:open -label:承認 -label:拒否`;
+            
+            let hasNextPage = true;
+            let cursor = null;
+            const allDiscussions = [];
+
+            while (hasNextPage) {
+              const discResult = await github.graphql(discQuery, { searchQuery, cursor });
+              allDiscussions.push(...discResult.search.nodes);
+              hasNextPage = discResult.search.pageInfo.hasNextPage;
+              cursor = discResult.search.pageInfo.endCursor;
+            }
+            
+            const now = new Date();
+            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS || "3") * 86400000;
+            const requiredScore = parseInt(process.env.REQUIRED_SCORE || "5");
+            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD || "3");
+
+            if (allDiscussions.length === 0) {
+              console.log("現在検証対象となるOPENな提案はありません。");
+              return;
+            }
+
+            // 4. 各Discussionのリアクションを取得・判定
+            const reactionQuery = `query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
+              repository(owner: $owner, name: $name) {
+                discussion(number: $number) {
+                  reactions(first: 100, after: $cursor) {
+                    pageInfo {
+                      hasNextPage
+                      endCursor
+                    }
+                    nodes {
+                      content
+                      user {
+                        login
                       }
                     }
                   }
@@ -75,71 +133,63 @@ jobs:
               }
             }`;
 
-            // 2. ブラックリストの読み込み（カンマまたは改行区切りを綺麗にパース）
-            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
-            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
-
-            const discVariables = {
-              owner: context.repo.owner,
-              name: context.repo.repo,
-              categoryId: categoryId
-            };
-
-            const discResult = await github.graphql(discQuery, discVariables);
-            const discussions = discResult.repository.discussions.nodes;
-            
-            const now = new Date();
-            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 86400000;
-            const requiredScore = parseInt(process.env.REQUIRED_SCORE);
-            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD);
-
-            if (discussions.length === 0) {
-              console.log("現在検証対象となるOPENな提案はありません。");
-              return;
-            }
-
-            for (const discussion of discussions) {
+            for (const discussion of allDiscussions) {
               const createdDate = new Date(discussion.createdAt);
-              
-              // 猶予期間（日数）のチェック
               if (now - createdDate < coolingOffPeriod) {
                 console.log(`Discussion #${discussion.number} はまだ猶予期間内です。スキップします。`);
                 continue;
               }
 
-              // 高評価・低評価の集計
+              console.log(`Processing Discussion #${discussion.number}: ${discussion.title}`);
+
+              let hasNextReactionPage = true;
+              let reactionCursor = null;
               let thumbsUp = 0;
               let thumbsDown = 0;
-              
-              for (const reaction of discussion.reactions.nodes) {
-                // 削除済みアカウント（userがnull）なら、最初からカウントせずにスキップ
-                if (!reaction.user) {
-                  console.log(`ℹ️ 削除されたアカウントの投票をスキップしました。`);
-                  continue;
+
+              // リアクションの全ページを回収
+              while (hasNextReactionPage) {
+                const reactResult = await github.graphql(reactionQuery, {
+                  owner: context.repo.owner,
+                  name: context.repo.repo,
+                  number: discussion.number,
+                  cursor: reactionCursor
+                });
+
+                const reactionsData = reactResult.repository.discussion.reactions;
+
+                for (const reaction of reactionsData.nodes) {
+                  if (!reaction.user) continue; // 削除済み垢はスキップ
+
+                  const voter = reaction.user.login.toLowerCase();
+                  if (userBlacklist.includes(voter)) {
+                    console.log(`🚫 ブラックリストユーザー ${voter} の投票をスキップしました。`);
+                    continue;
+                  }
+
+                  if (reaction.content === 'THUMBS_UP') thumbsUp++;
+                  if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
                 }
-            
-                const voter = reaction.user.login.toLowerCase();
-                
-                // 投票者がブラックリストにいたら、カウントをスキップ
-                if (userBlacklist.includes(voter)) {
-                  console.log(`🚫 ブラックリストユーザー ${voter} の投票をスキップしました。`);
-                  continue;
-                }
-                if (reaction.content === 'THUMBS_UP') thumbsUp++;
-                if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
+
+                hasNextReactionPage = reactionsData.pageInfo.hasNextPage;
+                reactionCursor = reactionsData.pageInfo.endCursor;
               }
 
               const score = thumbsUp - thumbsDown;
-              console.log(`Discussion #${discussion.number} [${discussion.title}] -> Score: ${score} (👍:${thumbsUp}, 👎:${thumbsDown})`);
+              console.log(`Discussion #${discussion.number} -> Score: ${score} (👍:${thumbsUp}, 👎:${thumbsDown})`);
 
-              // 判定ロジック
+              // 最終判定とラベル付与
               if (score >= requiredScore && thumbsDown < rejectionThreshold) {
-                  console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリアしました！`);
-                  // 承認処理へ
+                console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリア！`);
+                await github.graphql(`mutation($id:ID!, $labelId:ID!) {
+                  addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
+                }`, { id: discussion.id, labelId: approveLabelId });
               } else if (thumbsDown >= rejectionThreshold) {
-                  console.log(`⚠️ Discussion #${discussion.number} は反対票が閾値(${rejectionThreshold})に達したため凍結します。`);
-                  // 必要ならここで「凍結ラベル」を貼る処理を入れる
+                console.log(`⚠️ Discussion #${discussion.number} は反対多数のため拒否（凍結）します。`);
+                await github.graphql(`mutation($id:ID!, $labelId:ID!) {
+                  addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
+                }`, { id: discussion.id, labelId: rejectLabelId });
               } else {
-                  console.log(`⏳ Discussion #${discussion.number} はまだ判定保留中です（Score: ${score}, 👎: ${thumbsDown}）。`);
+                console.log(`⏳ Discussion #${discussion.number} は判定保留中です。`);
               }
             }
