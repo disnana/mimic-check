@@ -84,7 +84,6 @@ jobs:
             const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 86400000;
             const requiredScore = parseInt(process.env.REQUIRED_SCORE);
             const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD);
-            console.log(coolingOffPeriod);
 
             if (discussions.length === 0) {
               console.log("現在検証対象となるOPENな提案はありません。");
