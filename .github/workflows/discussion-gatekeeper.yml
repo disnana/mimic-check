@@ -5,13 +5,12 @@ on:
 
 permissions:
   discussions: write
-  contents: read # trusted.jsonを読み込むために必要
+  contents: read
 
 jobs:
   validate-proposal:
     runs-on: ubuntu-latest
     steps:
-      # trusted.jsonを読み込むためにリポジトリをチェックアウト
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -19,17 +18,20 @@ jobs:
         uses: actions/github-script@v7
         env:
           BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
+          BLACKLISTED_PACKAGES: ${{ vars.BLACKLISTED_PACKAGES }}
         with:
           script: |
             const fs = require('fs');
             const discussion = context.payload.discussion;
             const discussionId = discussion.node_id;
             const author = discussion.user.login.toLowerCase();
-            const blacklist = (process.env.BLACKLISTED_USERS || "").split(",").map(u => u.trim().toLowerCase());
+            
+            // カンマ区切りの変数を配列に変換
+            const blacklistedUsers = (process.env.BLACKLISTED_USERS || "").split(",").map(u => u.trim().toLowerCase());
+            const blacklistedPackages = (process.env.BLACKLISTED_PACKAGES || "").split(",").map(p => p.trim());
 
             // --- ヘルパー関数: コメントしてクローズする ---
             async function closeAndComment(bodyText, closeReason = 'DUPLICATE') {
-              // 1. コメントを追加 (GraphQL)
               await github.graphql(`
                 mutation($discussionId: ID!, $body: String!) {
                   addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
@@ -38,8 +40,6 @@ jobs:
                 }
               `, { discussionId, body: bodyText });
 
-              // 2. ディスカッションをクローズ (GraphQL)
-              // reason: DUPLICATE, OUTDATED, RESOLVED のいずれか
               await github.graphql(`
                 mutation($discussionId: ID!, $reason: DiscussionCloseReason!) {
                   closeDiscussion(input: {discussionId: $discussionId, reason: $reason}) {
@@ -50,19 +50,16 @@ jobs:
             }
 
             // ==========================================
-            // 1. ブラックリストチェック
+            // 1. ユーザーのブラックリストチェック
             // ==========================================
-            if (blacklist.includes(author)) {
+            if (blacklistedUsers.includes(author)) {
               await closeAndComment("🚫 ブラックリストユーザーによる提案のため、自動的に拒否しました。", "OUTDATED");
               return;
             }
 
             // ==========================================
-            // 2. 提案内容の抽出（タイトルまたは本文から抽出）
+            // 2. 提案内容(パッケージ名)の抽出
             // ==========================================
-            // ※ここでは例として、タイトルをそのまま提案パッケージ名として扱うか、
-            //   本文内に「パッケージ名: xxx」と書かれていることを想定しています。
-            //   必要に応じて正規表現を変更してください。
             const titleMatch = discussion.title.trim();
             const bodyMatch = discussion.body.match(/パッケージ名[:：]\s*([a-zA-Z0-9_\-\.]+)/);
             const proposedItem = bodyMatch ? bodyMatch[1] : titleMatch;
@@ -73,19 +70,25 @@ jobs:
             }
 
             // ==========================================
-            // 3. 既存の trusted.json を読み込んで重複チェック
+            // 3. パッケージのブラックリストチェック (NEW!)
             // ==========================================
-            let trustedData = [];
-            try {
-              const rawData = fs.readFileSync('trusted.json', 'utf8');
-              trustedData = JSON.parse(rawData);
-            } catch (err) {
-              console.log("trusted.json の読み込みに失敗しました:", err);
+            if (blacklistedPackages.includes(proposedItem)) {
+              await closeAndComment(`🚫 提案された \`${proposedItem}\` はブラックリストに登録されているため、受け付けることができません。`, "OUTDATED");
+              return;
             }
 
-            // ※ trusted.json が配列 ["pkg1", "pkg2"] の場合。
-            // オブジェクトの配列 [{"name": "pkg1"}] の場合は `trustedData.some(item => item.name === proposedItem)` に変更してください。
-            const isAlreadyTrusted = trustedData.includes(proposedItem);
+            // ==========================================
+            // 4. 既存の trusted.json を読み込んで重複チェック (修正済)
+            // ==========================================
+            let isAlreadyTrusted = false;
+            try {
+              // ファイルを文字列として読み込む
+              const rawData = fs.readFileSync('trusted.json', 'utf8');
+              // 構造に関係なく、"パッケージ名" という独立した文字列としてJSON内に存在するかチェック
+              isAlreadyTrusted = rawData.includes(`"${proposedItem}"`);
+            } catch (err) {
+              console.log("trusted.json の読み込みに失敗しました（ファイルが存在しない可能性があります）:", err);
+            }
 
             if (isAlreadyTrusted) {
               await closeAndComment(`🚫 提案された \`${proposedItem}\` はすでに \`trusted.json\` に登録済みです。\nご提案ありがとうございました！`, "DUPLICATE");
@@ -93,9 +96,8 @@ jobs:
             }
 
             // ==========================================
-            // 4. 承認待ち（既存のOpenなディスカッション）との重複チェック
+            // 5. 承認待ち（既存のOpenなディスカッション）との重複チェック
             // ==========================================
-            // GraphQLを使用して、同じリポジトリ内のOpenなディスカッションを検索
             const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} is:open is:discussion "${proposedItem}"`;
             const searchResult = await github.graphql(`
               query($searchQuery: String!) {
@@ -110,7 +112,7 @@ jobs:
               }
             `, { searchQuery });
 
-            // 自分自身（今作られたディスカッション）を除外して重複があるか確認
+            // 自分自身を除外
             const duplicates = searchResult.search.nodes.filter(node => node.number !== discussion.number);
 
             if (duplicates.length > 0) {
@@ -119,4 +121,4 @@ jobs:
               return;
             }
 
-            console.log("✅ すべてのチェックを通過しました。");
+            console.log(`✅ ${proposedItem} はすべてのチェックを通過しました！`);
