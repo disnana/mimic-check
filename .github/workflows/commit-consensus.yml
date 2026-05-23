@@ -152,22 +152,24 @@ jobs:
               if (!pkgName) pkgName = `unknown-discussions-${discussion.number}`;
               if (!reason) reason = `Discussion #${discussion.number} で合意された処理。`;
             
+              // 万が一誰も投票していない状態なら、フォールバックとして処理実行者を入れておく
+              const verifiersList = votersSet.size > 0 ? Array.from(votersSet) : [context.actor];
               const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
               
               const newRecord = {
                 name: pkgName,
                 reason: reason,
                 date: todayStr,
-                verifiers: ["github-actions"]
+                verifiers: verifiersList
               };
             
               if (isApproved) {
-                stateData.trusted_packages.push(newRecord);
-                console.log(`📝 trusted.json に追加 (Trusted): ${pkgName}`);
-              } else {
-                stateData.block_packages.push(newRecord);
-                console.log(`📝 trusted.json に追加 (Block): ${pkgName}`);
-              }
+                  stateData.trusted_packages.push(newRecord);
+                  console.log(`📝 trusted.json に追加 (Trusted): ${pkgName} by [${verifiersList.join(', ')}]`);
+                } else {
+                  stateData.block_packages.push(newRecord);
+                  console.log(`📝 trusted.json に追加 (Block): ${pkgName} by [${verifiersList.join(', ')}]`);
+                }
             
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
