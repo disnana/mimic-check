@@ -7,6 +7,14 @@
       "verifiers": [
         "github-actions"
       ]
+    },
+    {
+      "name": "discord.py",
+      "reason": "Discord.pyは長い間コミュニティから信頼されているライブラリです。",
+      "date": "2026-05-23",
+      "verifiers": [
+        "github-actions"
+      ]
     }
   ],
   "block_packages": [
