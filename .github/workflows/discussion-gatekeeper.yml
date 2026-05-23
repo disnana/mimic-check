@@ -1,20 +1,21 @@
 name: "🛡️ Discussion Gatekeeper"
 on:
   discussion:
-    types: [created]
+    types: [created, closed, deleted] # 閉じた時や削除された時もトリガーする
 
 permissions:
   discussions: write
-  contents: read
+  contents: write # jsonファイルをコミット・プッシュするために必要
 
 jobs:
-  validate-proposal:
+  manage-proposals:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate Proposal
+      - name: Process Discussion
+        id: gatekeeper
         uses: actions/github-script@v7
         env:
           BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
@@ -22,10 +23,38 @@ jobs:
         with:
           script: |
             const fs = require('fs');
+            const action = context.payload.action;
             const discussion = context.payload.discussion;
             const discussionId = discussion.node_id;
-            const author = discussion.user.login.toLowerCase();
+            const discussionNum = discussion.number.toString();
             
+            const PENDING_FILE = 'pending.json';
+            let pendingData = {};
+            
+            // 既存の pending.json を読み込む
+            if (fs.existsSync(PENDING_FILE)) {
+              pendingData = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
+            }
+
+            // ==========================================
+            // A. クローズ・削除された場合の処理 (pending から削除)
+            // ==========================================
+            if (action === 'closed' || action === 'deleted') {
+              if (pendingData[discussionNum]) {
+                console.log(`🗑️ pending.json から ${pendingData[discussionNum]} (Discussion #${discussionNum}) を削除します。`);
+                delete pendingData[discussionNum];
+                fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingData, null, 2));
+                core.setOutput('should_commit', 'true');
+              } else {
+                console.log("削除対象が pending.json に見つかりませんでした。");
+              }
+              return; // ここで終了
+            }
+
+            // ==========================================
+            // B. 新規作成された場合の処理 (重複チェック & pending に追加)
+            // ==========================================
+            const author = discussion.user.login.toLowerCase();
             const blacklistedUsers = (process.env.BLACKLISTED_USERS || "").split(",").map(u => u.trim().toLowerCase());
             const blacklistedPackages = (process.env.BLACKLISTED_PACKAGES || "").split(",").map(p => p.trim());
 
@@ -47,67 +76,67 @@ jobs:
               `, { discussionId, reason: closeReason });
             }
 
-            // 1. ユーザーのブラックリストチェック
+            // 1. ブラックリストユーザー
             if (blacklistedUsers.includes(author)) {
               await closeAndComment("🚫 ブラックリストユーザーによる提案のため、自動的に拒否しました。", "OUTDATED");
               return;
             }
 
-            // 2. 提案内容(パッケージ名)の抽出 (強化版)
+            // 2. パッケージ名の抽出
             const titleMatch = discussion.title.trim();
             const bodyMatch = discussion.body.match(/###\s*パッケージ名\s*[\r\n]+([a-zA-Z0-9_\-\.]+)/) 
                            || discussion.body.match(/パッケージ名[:：]\s*([a-zA-Z0-9_\-\.]+)/);
             
-            const proposedItem = bodyMatch ? bodyMatch[1] : titleMatch;
+            const proposedItem = bodyMatch ? bodyMatch[1].trim() : titleMatch;
 
             if (!proposedItem) {
               console.log("提案アイテムが抽出できなかったため、スキップします。");
               return;
             }
-            
-            console.log(`🔍 検証対象のパッケージ名: ${proposedItem}`);
+            console.log(`🔍 検証対象: ${proposedItem}`);
 
-            // 3. パッケージのブラックリストチェック
+            // 3. ブラックリストパッケージ
             if (blacklistedPackages.includes(proposedItem)) {
               await closeAndComment(`🚫 提案された \`${proposedItem}\` はブラックリストに登録されているため、受け付けることができません。`, "OUTDATED");
               return;
             }
 
-            // 4. 既存の trusted.json を読み込んで重複チェック
-            let isAlreadyTrusted = false;
+            // 4. trusted.json (すでに承認済みのもの) との重複チェック
             try {
-              const rawData = fs.readFileSync('trusted.json', 'utf8');
-              isAlreadyTrusted = rawData.includes(`"${proposedItem}"`);
-            } catch (err) {
-              console.log("trusted.json の読み込みに失敗しました:", err);
-            }
-
-            if (isAlreadyTrusted) {
-              await closeAndComment(`🚫 提案された \`${proposedItem}\` はすでに \`trusted.json\` に登録済みです。\nご提案ありがとうございました！`, "DUPLICATE");
-              return;
-            }
-
-            // 5. 承認待ち（既存のOpenなディスカッション）との重複チェック
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} is:open is:discussion "${proposedItem}"`;
-            const searchResult = await github.graphql(`
-              query($searchQuery: String!) {
-                search(query: $searchQuery, type: DISCUSSION, first: 5) {
-                  nodes {
-                    ... on Discussion {
-                      number
-                      url
-                    }
-                  }
+              if (fs.existsSync('trusted.json')) {
+                const rawData = fs.readFileSync('trusted.json', 'utf8');
+                if (rawData.includes(`"${proposedItem}"`)) {
+                  await closeAndComment(`🚫 提案された \`${proposedItem}\` はすでに \`trusted.json\` に登録済みです。\nご提案ありがとうございました！`, "DUPLICATE");
+                  return;
                 }
               }
-            `, { searchQuery });
+            } catch (err) {
+              console.log("trusted.json の読み込みエラー:", err);
+            }
 
-            const duplicates = searchResult.search.nodes.filter(node => node.number !== discussion.number);
-
-            if (duplicates.length > 0) {
-              const dupUrl = duplicates[0].url;
-              await closeAndComment(`🔄 \`${proposedItem}\` はすでに別のディスカッションで提案され、現在**承認待ち**です。\n重複先: ${dupUrl}`, "DUPLICATE");
+            // 5. pending.json (他の人が承認待ちしているもの) との重複チェック
+            const pendingItems = Object.values(pendingData);
+            if (pendingItems.includes(proposedItem)) {
+              // 重複しているディスカッション番号を特定
+              const dupKey = Object.keys(pendingData).find(key => pendingData[key] === proposedItem);
+              await closeAndComment(`🔄 \`${proposedItem}\` はすでに別のディスカッション (#${dupKey}) で提案され、現在**承認待ち**です。`, "DUPLICATE");
               return;
             }
 
-            console.log(`✅ ${proposedItem} はすべてのチェックを通過しました！`);
+            // 6. 全てのチェックを通過したら pending.json に追加
+            console.log(`✅ ${proposedItem} を pending.json に追加します。`);
+            pendingData[discussionNum] = proposedItem;
+            fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingData, null, 2));
+            
+            // コミット用のフラグを立てる
+            core.setOutput('should_commit', 'true');
+
+      - name: Commit and Push changes
+        if: steps.gatekeeper.outputs.should_commit == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pending.json
+          git commit -m "chore: update pending.json for discussion #${{ github.event.discussion.number }}"
+          git pull --rebase origin main  # 競合回避
+          git push
