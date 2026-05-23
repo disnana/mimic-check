@@ -3,6 +3,10 @@ on:
   discussion:
     types: [created, closed, deleted] # 閉じた時や削除された時もトリガーする
 
+concurrency:
+  group: discussion-gatekeeper-pending
+  cancel-in-progress: false # 先行する処理をキャンセルせず、終わるまで待機させる
+
 permissions:
   discussions: write
   contents: write # jsonファイルをコミット・プッシュするために必要
