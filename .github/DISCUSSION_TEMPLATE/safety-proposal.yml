@@ -1,27 +1,23 @@
-title: "[提案] "
+title: "[提案]"
 body:
   - type: input
     id: package-name
     attributes:
       label: パッケージ名
-      placeholder: 例: validkit-py
     validations:
       required: true
-
   - type: dropdown
     id: safety-status
     attributes:
       label: 安全性の評価
       options:
-        - 安全（ホワイトリスト推奨）
-        - 要注意 / 脆弱性の懸念あり
+        - 安全
+        - 危険
     validations:
       required: true
-
   - type: textarea
     id: reason
     attributes:
-      label: 理由・検証内容
-      placeholder: 依存関係の確認結果や、ソースコードを確認した上での判断理由を書いてください。
+      label: 理由
     validations:
       required: true
