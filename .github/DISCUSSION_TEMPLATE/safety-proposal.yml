@@ -1,8 +1,6 @@
 name: 安全性認定の提案
 description: コミュニティに新しいパッケージの安全性を提案します
 title: "[提案]: "
-category: "-%EF%B8%8F-パッケージ安全検証"
-labels: ["proposal"]
 body:
   - type: input
     id: package-name
