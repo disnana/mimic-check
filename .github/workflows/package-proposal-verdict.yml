@@ -1,0 +1,86 @@
+name: "🛡️ Community Safety Consensus"
+
+on:
+  schedule:
+    # 毎日夜22:00（日本時間）に自動実行 (UTC 13:00)
+    - cron: '0 13 * * *'
+  workflow_dispatch: # 手動で即時実行したい時用
+
+env:
+  REQUIRED_SCORE: 5        # 承認に必要な最低スコア (👍 - 👎)
+  COOLING_OFF_DAYS: 3      # 最低限公開しておく日数 (猶予期間)
+  CATEGORY_SLUG: "package-proposal" # 対象にするカテゴリのスラッグ
+
+jobs:
+  check-proposals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open GraphQL Query & Judge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const query = `query($owner:String!, $name:String!, $slug:String!) {
+              repository(owner: $owner, name: $name) {
+                discussionCategory(slug: $slug) {
+                  discussions(first: 50, states: [OPEN]) {
+                    nodes {
+                      id
+                      title
+                      createdAt
+                      number
+                      reactions(first: 100) {
+                        nodes {
+                          content
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }`;
+
+            const variables = {
+              owner: context.repo.owner,
+              name: context.repo.repo,
+              slug: process.env.CATEGORY_SLUG
+            };
+
+            const result = await github.graphql(query, variables);
+            const discussions = result.repository.discussionCategory.discussions.nodes;
+            
+            const now = new Date();
+            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 24 * 60 * 60 * 1000;
+            const requiredScore = parseInt(process.env.REQUIRED_SCORE);
+
+            for (const discussion of discussions) {
+              const createdDate = new Date(discussion.createdAt);
+              
+              // 1. 猶予期間（日数）のチェック
+              if (now - createdDate < coolingOffPeriod) {
+                console.log(`Discussion #${discussion.number} はまだ猶予期間内です。スキップします。`);
+                continue;
+              }
+
+              // 2. 高評価・低評価の集計
+              let thumbsUp = 0;
+              let thumbsDown = 0;
+              
+              for (const reaction of discussion.reactions.nodes) {
+                if (reaction.content === 'THUMBS_UP') thumbsUp++;
+                if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
+              }
+
+              const score = thumbsUp - thumbsDown;
+              console.log(`Discussion #${discussion.number} [${discussion.title}] -> Score: ${score} (👍:${thumbsUp}, 👎:${thumbsDown})`);
+
+              // 3. 判定判定
+              if (score >= requiredScore && thumbsDown === 0) {
+                console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリアしました！`);
+                
+                // ここにWebhook送信ロジックや、DiscussionsをClose、あるいはLabel付与する処理を追加します
+                
+              } else if (thumbsDown > 0) {
+                console.log(`⚠️ Discussion #${discussion.number} に反対票(👎)があるため、自動処理を凍結します。管理者の目視確認が必要です。`);
+              }
+            }
