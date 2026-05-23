@@ -5,7 +5,6 @@ on:
     - cron: '0 13 * * *'
   workflow_dispatch:
 
-# 👇 同時実行を防ぐ設定だけ追加
 concurrency:
   group: discussion-gatekeeper-pending
   cancel-in-progress: false
@@ -30,7 +29,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'trusted.json';
-            const PENDING_FILE = 'pending.json'; // 👈 追加: pending.jsonのパス
+            const PENDING_FILE = 'pending.json';
             
             const repoInfoQuery = `query($owner:String!, $name:String!, $categorySlug:String) {
               repository(owner: $owner, name: $name) {
@@ -77,16 +76,9 @@ jobs:
                 discussions(first: 50, categoryId: $categoryId, after: $cursor) {
                   pageInfo { hasNextPage endCursor }
                   nodes {
-                    id
-                    number
-                    body
-                    closed
+                    id number body closed
                     labels(first: 10) { nodes { name } }
-                    reactions(first: 100) {
-                      nodes {
-                        user { login }
-                      }
-                    }
+                    reactions(first: 100) { nodes { user { login } } }
                   }
                 }
               }
@@ -94,52 +86,37 @@ jobs:
             
             while (hasNextPage) {
               const result = await github.graphql(mainQuery, {
-                owner: context.repo.owner,
-                name: context.repo.repo,
-                categoryId: targetCategory.id,
-                cursor: cursor
+                owner: context.repo.owner, name: context.repo.repo, categoryId: targetCategory.id, cursor: cursor
               });
             
               const discData = result.repository.discussions;
-              
               for (const disc of discData.nodes) {
                 if (disc.closed) {
                   const hasApprove = disc.labels.nodes.some(l => l.name === "承認");
                   const hasReject = disc.labels.nodes.some(l => l.name === "拒否");
                   const hasRecorded = disc.labels.nodes.some(l => l.name === "追加済み");
-            
                   if ((hasApprove || hasReject) && !hasRecorded) {
                     targetDiscussions.push(disc);
                   }
                 }
               }
-            
               hasNextPage = discData.pageInfo.hasNextPage;
               cursor = discData.pageInfo.endCursor;
             }
             
             if (targetDiscussions.length === 0) {
-              console.log("本日新しく記録すべき確定済みの提案はありません（リアルタイムチェック結果）。");
+              console.log("本日新しく記録すべき確定済みの提案はありません。");
               return;
             }
             
             let stateData = { trusted_packages: [], block_packages: [] };
             if (fs.existsSync(path)) {
-              try {
-                stateData = JSON.parse(fs.readFileSync(path, 'utf8'));
-              } catch (e) {
-                stateData = { trusted_packages: [], block_packages: [] };
-              }
+              try { stateData = JSON.parse(fs.readFileSync(path, 'utf8')); } catch (e) { }
             }
 
-            // 👇 追加: pending.json を読み込む
             let pendingData = {};
             if (fs.existsSync(PENDING_FILE)) {
-              try {
-                pendingData = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8'));
-              } catch (e) {
-                pendingData = {};
-              }
+              try { pendingData = JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')); } catch (e) { }
             }
             
             const todayStr = new Date().toISOString().split('T')[0];
@@ -153,21 +130,17 @@ jobs:
             for (const discussion of targetDiscussions) {
               const body = discussion.body || "";
               
-              let pkgName = extractSection(body, "パッケージ名");
-              let reason = extractSection(body, "理由");
-            
-              if (!pkgName) pkgName = `unknown-discussions-${discussion.number}`;
-              if (!reason) reason = `Discussion #${discussion.number} で合意された処理。`;
+              let pkgName = extractSection(body, "パッケージ名") || `unknown-discussions-${discussion.number}`;
+              let reason = extractSection(body, "理由") || `Discussion #${discussion.number} で合意された処理。`;
+              
+              // 🚨 修正箇所: 安全性の評価を抽出
+              let evaluation = extractSection(body, "安全性の評価");
             
               const votersSet = new Set();
-              
               if (discussion.reactions && discussion.reactions.nodes) {
                 for (const react of discussion.reactions.nodes) {
-                  if (react.user && react.user.login) {
-                    const username = react.user.login;
-                    if (!userBlacklist.includes(username.toLowerCase())) {
-                      votersSet.add(username);
-                    }
+                  if (react.user && react.user.login && !userBlacklist.includes(react.user.login.toLowerCase())) {
+                    votersSet.add(react.user.login);
                   }
                 }
               }
@@ -175,26 +148,30 @@ jobs:
               const verifiersList = votersSet.size > 0 ? Array.from(votersSet) : [context.actor];
               const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
               
-              const newRecord = {
-                name: pkgName,
-                reason: reason,
-                date: todayStr,
-                verifiers: verifiersList
-              };
+              const newRecord = { name: pkgName, reason: reason, date: todayStr, verifiers: verifiersList };
             
               if (isApproved) {
+                // 承認された場合、提案の評価に応じて振り分ける
+                if (evaluation.includes("安全")) {
                   stateData.trusted_packages.push(newRecord);
-                  console.log(`📝 trusted.json に追加 (Trusted): ${pkgName} by [${verifiersList.join(', ')}]`);
-                } else {
+                  console.log(`✅ trusted.json に追加 (Trusted): ${pkgName} by [${verifiersList.join(', ')}]`);
+                } else if (evaluation.includes("危険")) {
                   stateData.block_packages.push(newRecord);
-                  console.log(`📝 trusted.json に追加 (Block): ${pkgName} by [${verifiersList.join(', ')}]`);
+                  console.log(`🚫 trusted.json に追加 (Block): ${pkgName} by [${verifiersList.join(', ')}]`);
+                } else {
+                  console.log(`⚠️ #${discussion.number} は評価不明(${evaluation})のため、スキップします。`);
                 }
+              } else {
+                // 拒否された場合（提案が却下された場合）
+                console.log(`❌ #${discussion.number} はコミュニティによって拒否されたため、リストには追加しません。`);
+              }
             
+              // 処理済みラベルを付与
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
               }`, { id: discussion.id, labelId: recordedLabel.id });
 
-              // 👇 追加: アーカイブ処理が終わったので、pending.json から削除する
+              // pending.json から削除
               const discNumStr = discussion.number.toString();
               if (pendingData[discNumStr]) {
                 delete pendingData[discNumStr];
@@ -202,7 +179,6 @@ jobs:
             }
             
             fs.writeFileSync(path, JSON.stringify(stateData, null, 2), 'utf8');
-            // 👇 追加: pending.json を保存
             fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingData, null, 2), 'utf8');
 
       - name: Commit and Push changes
