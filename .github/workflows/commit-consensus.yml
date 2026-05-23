@@ -22,7 +22,6 @@ jobs:
           CATEGORY_SLUG: "package-proposal"
           BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const path = 'trusted.json';
