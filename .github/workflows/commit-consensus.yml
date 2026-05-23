@@ -26,21 +26,39 @@ jobs:
             const fs = require('fs');
             const path = 'trusted.json';
             
-            // 1. カテゴリと「追加済み」ラベルのIDを取得
-            const repoInfoQuery = `query($owner:String!, $name:String!) {
+            // 1. カテゴリのスラッグから直接ディスカッションとラベルを一発で取得する
+            const repoInfoQuery = `query($owner:String!, $name:String!, $categorySlug:String) {
               repository(owner: $owner, name: $name) {
-                discussionCategories(first: 50) { nodes { slug name } }
-                labels(first: 100) { nodes { id name } }
+                discussionCategories(first: 50) {
+                  nodes { id slug }
+                }
+                labels(first: 100) {
+                  nodes { id name }
+                }
+                # インデックス遅延のない、リポジトリ直通のクエリを使用（STATESは指定せず全取得してJS側でフィルタ）
+                discussions(first: 100, categoryId: $categorySlug) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
+                    id
+                    number
+                    body
+                    closed
+                    labels(first: 10) { nodes { name } }
+                  }
+                }
               }
             }`;
             
-            const repoInfoResult = await github.graphql(repoInfoQuery, {
-              owner: context.repo.owner,
-              name: context.repo.repo
-            });
+            // まずはカテゴリIDを特定するために、一度だけカテゴリ一覧を取得
+            const initResult = await github.graphql(`query($owner:String!, $name:String!) {
+              repository(owner: $owner, name: $name) {
+                discussionCategories(first: 50) { nodes { id slug } }
+                labels(first: 100) { nodes { id name } }
+              }
+            }`, { owner: context.repo.owner, name: context.repo.repo });
             
-            const categories = repoInfoResult.repository.discussionCategories.nodes;
-            const labelsNodes = repoInfoResult.repository.labels.nodes;
+            const categories = initResult.repository.discussionCategories.nodes;
+            const labelsNodes = initResult.repository.labels.nodes;
             const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
             
             if (!targetCategory) {
@@ -48,46 +66,65 @@ jobs:
               return;
             }
             
-            // ラベル名を「追加済み」に修正
             const recordedLabel = labelsNodes.find(l => l.name === "追加済み");
             if (!recordedLabel) {
-              console.log("⚠️ 「追加済み」ラベルがリポジトリに見つかりません。あらかじめ作成しておいてください。");
+              console.log("⚠️ 「追加済み」ラベルがリポジトリに見つかりません。");
               return;
             }
             
-            // 2. クローズ理由（RESOLVED / OUTDATED）を指定して「追加済み」がないものを検索
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" reason:RESOLVED reason:OUTDATED -label:追加済み`;
+            // 2. リアルタイムデータから、条件に合うディスカッションをJS側で安全にフィルタリングする
+            let hasNextPage = true;
+            let cursor = null;
+            const targetDiscussions = [];
             
-            const discQuery = `query($searchQuery:String!, $cursor:String) {
-              search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
-                pageInfo { hasNextPage endCursor }
-                nodes {
-                  ... on Discussion {
+            const mainQuery = `query($owner:String!, $name:String!, $categoryId:ID, $cursor:String) {
+              repository(owner: $owner, name: $name) {
+                discussions(first: 50, categoryId: $categoryId, after: $cursor) {
+                  pageInfo { hasNextPage endCursor }
+                  nodes {
                     id
                     number
                     body
+                    closed
                     labels(first: 10) { nodes { name } }
                   }
                 }
               }
             }`;
             
-            let hasNextPage = true;
-            let cursor = null;
-            const targetDiscussions = [];
-            
             while (hasNextPage) {
-              const discResult = await github.graphql(discQuery, { searchQuery, cursor });
-              targetDiscussions.push(...discResult.search.nodes);
-              hasNextPage = discResult.search.pageInfo.hasNextPage;
-              cursor = discResult.search.pageInfo.endCursor;
+              const result = await github.graphql(mainQuery, {
+                owner: context.repo.owner,
+                name: context.repo.repo,
+                categoryId: targetCategory.id,
+                cursor: cursor
+              });
+            
+              const discData = result.repository.discussions;
+              
+              // JS側で「クローズ済み」かつ「承認 or 拒否あり」かつ「追加済みがない」ものを抽出
+              for (const disc of discData.nodes) {
+                if (disc.closed) {
+                  const hasApprove = disc.labels.nodes.some(l => l.name === "承認");
+                  const hasReject = disc.labels.nodes.some(l => l.name === "拒否");
+                  const hasRecorded = disc.labels.nodes.some(l => l.name === "追加済み");
+            
+                  if ((hasApprove || hasReject) && !hasRecorded) {
+                    targetDiscussions.push(disc);
+                  }
+                }
+              }
+            
+              hasNextPage = discData.pageInfo.hasNextPage;
+              cursor = discData.pageInfo.endCursor;
             }
             
             if (targetDiscussions.length === 0) {
-              console.log("本日新しく記録すべき確定済みの提案はありません。");
+              console.log("本日新しく記録すべき確定済みの提案はありません（リアルタイムチェック結果）。");
               return;
             }
             
+            // 3. trusted.json の読み込みとパース
             let stateData = { trusted_packages: [], block_packages: [] };
             if (fs.existsSync(path)) {
               try {
@@ -105,6 +142,7 @@ jobs:
               return match ? match[1].trim() : "";
             }
             
+            // 4. 配列への割り振りと「追加済み」ラベルの付与
             for (const discussion of targetDiscussions) {
               const body = discussion.body || "";
               
@@ -131,7 +169,6 @@ jobs:
                 console.log(`📝 trusted.json に追加 (Block): ${pkgName}`);
               }
             
-              // 処理が終わったら「追加済み」ラベルを貼る
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
               }`, { id: discussion.id, labelId: recordedLabel.id });
