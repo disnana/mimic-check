@@ -15,15 +15,15 @@ jobs:
     steps:
       - name: Open GraphQL Query & Judge
         uses: actions/github-script@v7
+          # 確実にJS側へ環境変数を引き渡す
+        env:
+          COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
+          REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
+          REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
+          BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
+          CATEGORY_SLUG: "package-proposal"
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          # 確実にJS側へ環境変数を引き渡す
-          env:
-            COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
-            REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
-            REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
-            BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
-            CATEGORY_SLUG: "package-proposal"
           script: |
             // 1. カテゴリIDとラベルIDを取得
             const repoInfoQuery = `query($owner:String!, $name:String!) {
