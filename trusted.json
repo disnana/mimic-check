@@ -15,6 +15,14 @@
       "verifiers": [
         "github-actions"
       ]
+    },
+    {
+      "name": "apsw",
+      "reason": "APSWはSQLiteのラッパーで、c言語で作成されています。また、GitHubにコードが公開されており安全です。",
+      "date": "2026-05-23",
+      "verifiers": [
+        "harumaki4649"
+      ]
     }
   ],
   "block_packages": [
