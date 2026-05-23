@@ -12,6 +12,7 @@ permissions:
 env:
   COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
   REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
+  REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
   CATEGORY_SLUG: "package-proposal"
 
 jobs:
@@ -82,6 +83,7 @@ jobs:
             const now = new Date();
             const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS) * 86400000;
             const requiredScore = parseInt(process.env.REQUIRED_SCORE);
+            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD);
             console.log(coolingOffPeriod);
 
             if (discussions.length === 0) {
@@ -110,11 +112,14 @@ jobs:
               const score = thumbsUp - thumbsDown;
               console.log(`Discussion #${discussion.number} [${discussion.title}] -> Score: ${score} (👍:${thumbsUp}, 👎:${thumbsDown})`);
 
-              // 判定
-              if (score >= requiredScore && thumbsDown === 0) {
-                console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリアしました！`);
-                // TODO: 承認時の処理（Webhookなど）をここに挟む
-              } else if (thumbsDown > 0) {
-                console.log(`⚠️ Discussion #${discussion.number} に反対票(👎)があるため、自動処理を凍結します。`);
+              // 判定ロジック
+              if (score >= requiredScore && thumbsDown < rejectionThreshold) {
+                  console.log(`🎉 Discussion #${discussion.number} が承認ラインをクリアしました！`);
+                  // 承認処理へ
+              } else if (thumbsDown >= rejectionThreshold) {
+                  console.log(`⚠️ Discussion #${discussion.number} は反対票が閾値(${rejectionThreshold})に達したため凍結します。`);
+                  // 必要ならここで「凍結ラベル」を貼る処理を入れる
+              } else {
+                  console.log(`⏳ Discussion #${discussion.number} はまだ判定保留中です（Score: ${score}, 👎: ${thumbsDown}）。`);
               }
             }
