@@ -20,13 +20,13 @@ jobs:
         uses: actions/github-script@v7
         env:
           CATEGORY_SLUG: "package-proposal"
+          BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const path = 'trusted.json';
             
-            // 1. カテゴリのスラッグから直接ディスカッションとラベルを一発で取得する
             const repoInfoQuery = `query($owner:String!, $name:String!, $categorySlug:String) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) {
@@ -35,21 +35,9 @@ jobs:
                 labels(first: 100) {
                   nodes { id name }
                 }
-                # インデックス遅延のない、リポジトリ直通のクエリを使用（STATESは指定せず全取得してJS側でフィルタ）
-                discussions(first: 100, categoryId: $categorySlug) {
-                  pageInfo { hasNextPage endCursor }
-                  nodes {
-                    id
-                    number
-                    body
-                    closed
-                    labels(first: 10) { nodes { name } }
-                  }
-                }
               }
             }`;
             
-            // まずはカテゴリIDを特定するために、一度だけカテゴリ一覧を取得
             const initResult = await github.graphql(`query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) { nodes { id slug } }
@@ -71,8 +59,10 @@ jobs:
               console.log("⚠️ 「追加済み」ラベルがリポジトリに見つかりません。");
               return;
             }
+
+            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
+            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
             
-            // 2. リアルタイムデータから、条件に合うディスカッションをJS側で安全にフィルタリングする
             let hasNextPage = true;
             let cursor = null;
             const targetDiscussions = [];
@@ -87,6 +77,11 @@ jobs:
                     body
                     closed
                     labels(first: 10) { nodes { name } }
+                    reactions(first: 100) {
+                      nodes {
+                        user { login }
+                      }
+                    }
                   }
                 }
               }
@@ -102,7 +97,6 @@ jobs:
             
               const discData = result.repository.discussions;
               
-              // JS側で「クローズ済み」かつ「承認 or 拒否あり」かつ「追加済みがない」ものを抽出
               for (const disc of discData.nodes) {
                 if (disc.closed) {
                   const hasApprove = disc.labels.nodes.some(l => l.name === "承認");
@@ -124,7 +118,6 @@ jobs:
               return;
             }
             
-            // 3. trusted.json の読み込みとパース
             let stateData = { trusted_packages: [], block_packages: [] };
             if (fs.existsSync(path)) {
               try {
@@ -142,7 +135,6 @@ jobs:
               return match ? match[1].trim() : "";
             }
             
-            // 4. 配列への割り振りと「追加済み」ラベルの付与
             for (const discussion of targetDiscussions) {
               const body = discussion.body || "";
               
@@ -152,7 +144,19 @@ jobs:
               if (!pkgName) pkgName = `unknown-discussions-${discussion.number}`;
               if (!reason) reason = `Discussion #${discussion.number} で合意された処理。`;
             
-              // 万が一誰も投票していない状態なら、フォールバックとして処理実行者を入れておく
+              const votersSet = new Set();
+              
+              if (discussion.reactions && discussion.reactions.nodes) {
+                for (const react of discussion.reactions.nodes) {
+                  if (react.user && react.user.login) {
+                    const username = react.user.login;
+                    if (!userBlacklist.includes(username.toLowerCase())) {
+                      votersSet.add(username);
+                    }
+                  }
+                }
+              }
+
               const verifiersList = votersSet.size > 0 ? Array.from(votersSet) : [context.actor];
               const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
               
