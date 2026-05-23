@@ -31,6 +31,14 @@
       "verifiers": [
         "harumaki4649"
       ]
+    },
+    {
+      "name": "nanasqlite",
+      "reason": "Disnanaが開発しているOSSのSQLiteラッパーのため安全です。",
+      "date": "2026-05-23",
+      "verifiers": [
+        "harumaki4649"
+      ]
     }
   ],
   "block_packages": [
