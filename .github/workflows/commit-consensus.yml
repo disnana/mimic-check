@@ -1,32 +1,34 @@
-name: "🛡️ Community Safety Consensus"
+name: "📦 Daily Consensus Archiver"
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 permissions:
   discussions: write
-  contents: read
+  contents: write
 
 jobs:
-  check-proposals:
+  archive-consensus:
     runs-on: ubuntu-latest
     steps:
-      - name: Open GraphQL Query & Judge
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Archive Decisions & Commit
         uses: actions/github-script@v7
         env:
-          COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
-          REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
-          REJECTION_THRESHOLD: ${{ vars.REJECTION_THRESHOLD }}
-          BLACKLISTED_USERS: ${{ vars.BLACKLISTED_USERS }}
           CATEGORY_SLUG: "package-proposal"
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
+            const path = 'trusted.json';
+
             const repoInfoQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
-                discussionCategories(first: 50) { nodes { id slug name } }
+                discussionCategories(first: 50) { nodes { slug name } }
                 labels(first: 100) { nodes { id name } }
               }
             }`;
@@ -40,129 +42,104 @@ jobs:
             const labelsNodes = repoInfoResult.repository.labels.nodes;
             const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
 
-            if (!targetCategory) {
-              console.log(`❌ カテゴリ "${process.env.CATEGORY_SLUG}" が見つかりませんでした。`);
-              return;
-            }
+            if (!targetCategory) return;
 
-            const labelMap = {};
-            labelsNodes.forEach(l => { labelMap[l.name] = l.id; });
-            const approveLabelId = labelMap["承認"];
-            const rejectLabelId = labelMap["拒否"];
+            const recordedLabel = labelsNodes.find(l => l.name === "記録済み");
+            if (!recordedLabel) return;
+
+            // すでにCloseされている（is:closed）もので、承認/拒否があり、記録済みではないものをスキャン
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:closed (label:承認 OR label:拒否) -label:記録済み`;
             
-            if (!approveLabelId || !rejectLabelId) {
-              console.log("⚠️ 「承認」または「拒否」ラベルがリポジトリに見つかりません。");
-              return;
-            }
-
-            const rawBlacklist = process.env.BLACKLISTED_USERS || "";
-            const userBlacklist = rawBlacklist.split(/[,\n]/).map(u => u.trim().toLowerCase()).filter(u => u !== "");
-
             const discQuery = `query($searchQuery:String!, $cursor:String) {
               search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
                 pageInfo { hasNextPage endCursor }
                 nodes {
-                  ... on Discussion { id title createdAt number }
-                }
-              }
-            }`;
-
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:open -label:承認 -label:拒否`;
-            
-            let hasNextPage = true;
-            let cursor = null;
-            const allDiscussions = [];
-
-            while (hasNextPage) {
-              const discResult = await github.graphql(discQuery, { searchQuery, cursor });
-              allDiscussions.push(...discResult.search.nodes);
-              hasNextPage = discResult.search.pageInfo.hasNextPage;
-              cursor = discResult.search.pageInfo.endCursor;
-            }
-            
-            const now = new Date();
-            const coolingOffPeriod = parseInt(process.env.COOLING_OFF_DAYS || "3") * 86400000;
-            const requiredScore = parseInt(process.env.REQUIRED_SCORE || "5");
-            const rejectionThreshold = parseInt(process.env.REJECTION_THRESHOLD || "3");
-
-            if (allDiscussions.length === 0) {
-              console.log("現在検証対象となるOPENな提案はありません。");
-              return;
-            }
-
-            const reactionQuery = `query($owner:String!, $name:String!, $number:Int!, $cursor:String) {
-              repository(owner: $owner, name: $name) {
-                discussion(number: $number) {
-                  reactions(first: 100, after: $cursor) {
-                    pageInfo { hasNextPage endCursor }
-                    nodes { content user { login } }
+                  ... on Discussion {
+                    id
+                    number
+                    body
+                    labels(first: 10) { nodes { name } }
                   }
                 }
               }
             }`;
 
-            for (const discussion of allDiscussions) {
-              const createdDate = new Date(discussion.createdAt);
-              if (now - createdDate < coolingOffPeriod) {
-                console.log(`Discussion #${discussion.number} はまだ猶予期間内です。スキップします。`);
-                continue;
-              }
+            let hasNextPage = true;
+            let cursor = null;
+            const targetDiscussions = [];
 
-              let hasNextReactionPage = true;
-              let reactionCursor = null;
-              let thumbsUp = 0;
-              let thumbsDown = 0;
+            while (hasNextPage) {
+              const discResult = await github.graphql(discQuery, { searchQuery, cursor });
+              targetDiscussions.push(...discResult.search.nodes);
+              hasNextPage = discResult.search.pageInfo.hasNextPage;
+              cursor = discResult.search.pageInfo.endCursor;
+            }
 
-              while (hasNextReactionPage) {
-                const reactResult = await github.graphql(reactionQuery, {
-                  owner: context.repo.owner,
-                  name: context.repo.repo,
-                  number: discussion.number,
-                  cursor: reactionCursor
-                });
+            if (targetDiscussions.length === 0) {
+              console.log("本日新しく記録すべき確定済みの提案はありません。");
+              return;
+            }
 
-                const reactionsData = reactResult.repository.discussion.reactions;
-
-                for (const reaction of reactionsData.nodes) {
-                  if (!reaction.user) continue;
-                  const voter = reaction.user.login.toLowerCase();
-                  if (userBlacklist.includes(voter)) continue;
-
-                  if (reaction.content === 'THUMBS_UP') thumbsUp++;
-                  if (reaction.content === 'THUMBS_DOWN') thumbsDown++;
-                }
-                hasNextReactionPage = reactionsData.pageInfo.hasNextPage;
-                reactionCursor = reactionsData.pageInfo.endCursor;
-              }
-
-              const score = thumbsUp - thumbsDown;
-              let finalLabelId = null;
-              let actionType = null;
-
-              if (score >= requiredScore && thumbsDown < rejectionThreshold) {
-                finalLabelId = approveLabelId;
-                actionType = "承認";
-              } else if (thumbsDown >= rejectionThreshold) {
-                finalLabelId = rejectLabelId;
-                actionType = "拒否";
-              }
-
-              if (finalLabelId) {
-                console.log(`🎉 Discussion #${discussion.number} を【${actionType}】判定にします。`);
-                
-                // 1. ラベルの付与
-                await github.graphql(`mutation($id:ID!, $labelId:ID!) {
-                  addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
-                }`, { id: discussion.id, labelId: finalLabelId });
-
-                // 2. 自動Close (理由を OUTDATED または RESOLVED に)
-                const closeReason = actionType === "承認" ? "RESOLVED" : "OUTDATED";
-                await github.graphql(`mutation($id:ID!, $reason:DiscussionCloseReason!) {
-                  closeDiscussion(input: {discussionId: $id, reason: $reason}) { clientMutationId }
-                }`, { id: discussion.id, reason: closeReason });
-
-                console.log(`🔒 #${discussion.number} にラベルを貼り、自動Closeしました。`);
-              } else {
-                console.log(`⏳ Discussion #${discussion.number} は判定保留中です。`);
+            let stateData = { trusted_packages: [], block_packages: [] };
+            if (fs.existsSync(path)) {
+              try {
+                stateData = JSON.parse(fs.readFileSync(path, 'utf8'));
+              } catch (e) {
+                stateData = { trusted_packages: [], block_packages: [] };
               }
             }
+
+            const todayStr = new Date().toISOString().split('T')[0];
+
+            // 本文から特定のセクションの中身を抜き出す関数
+            function extractSection(body, headerName) {
+              const regex = new RegExp(`###\\s+${headerName}\\s+([\\s\\S]*?)(?=###|$)`, 'i');
+              const match = body.match(regex);
+              return match ? match[1].trim() : "";
+            }
+
+            for (const discussion of targetDiscussions) {
+              const body = discussion.body || "";
+              
+              // テンプレートからデータを抽出
+              let pkgName = extractSection(body, "パッケージ名");
+              let reason = extractSection(body, "理由");
+
+              // 万が一テンプレートが崩れてパースできなかった場合のフォールバック
+              if (!pkgName) pkgName = `unknown-discussions-${discussion.number}`;
+              if (!reason) reason = `Discussion #${discussion.number} で合意された処理。`;
+
+              const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
+              
+              const newRecord = {
+                name: pkgName,
+                reason: reason,
+                date: todayStr,
+                verifiers: ["github-actions"]
+              };
+
+              if (isApproved) {
+                stateData.trusted_packages.push(newRecord);
+                console.log(`📝 trusted.json に追加 (Trusted): ${pkgName}`);
+              } else {
+                stateData.block_packages.push(newRecord);
+                console.log(`📝 trusted.json に追加 (Block): ${pkgName}`);
+              }
+
+              // 処理が終わったら「記録済み」を貼る
+              await github.graphql(`mutation($id:ID!, $labelId:ID!) {
+                addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
+              }`, { id: discussion.id, labelId: recordedLabel.id });
+            }
+
+            fs.writeFileSync(path, JSON.stringify(stateData, null, 2), 'utf8');
+
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          if [ -f trusted.json ]; then
+            git add trusted.json
+            git commit -m "🤖 chore: update trusted.json with parsed daily consensus [skip ci]" || echo "No changes to commit"
+            git push
+          fi
