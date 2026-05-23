@@ -26,11 +26,9 @@ jobs:
             const discussionId = discussion.node_id;
             const author = discussion.user.login.toLowerCase();
             
-            // カンマ区切りの変数を配列に変換
             const blacklistedUsers = (process.env.BLACKLISTED_USERS || "").split(",").map(u => u.trim().toLowerCase());
             const blacklistedPackages = (process.env.BLACKLISTED_PACKAGES || "").split(",").map(p => p.trim());
 
-            // --- ヘルパー関数: コメントしてクローズする ---
             async function closeAndComment(bodyText, closeReason = 'DUPLICATE') {
               await github.graphql(`
                 mutation($discussionId: ID!, $body: String!) {
@@ -49,45 +47,39 @@ jobs:
               `, { discussionId, reason: closeReason });
             }
 
-            // ==========================================
             // 1. ユーザーのブラックリストチェック
-            // ==========================================
             if (blacklistedUsers.includes(author)) {
               await closeAndComment("🚫 ブラックリストユーザーによる提案のため、自動的に拒否しました。", "OUTDATED");
               return;
             }
 
-            // ==========================================
-            // 2. 提案内容(パッケージ名)の抽出
-            // ==========================================
+            // 2. 提案内容(パッケージ名)の抽出 (強化版)
             const titleMatch = discussion.title.trim();
-            const bodyMatch = discussion.body.match(/パッケージ名[:：]\s*([a-zA-Z0-9_\-\.]+)/);
+            const bodyMatch = discussion.body.match(/###\s*パッケージ名\s*[\r\n]+([a-zA-Z0-9_\-\.]+)/) 
+                           || discussion.body.match(/パッケージ名[:：]\s*([a-zA-Z0-9_\-\.]+)/);
+            
             const proposedItem = bodyMatch ? bodyMatch[1] : titleMatch;
 
             if (!proposedItem) {
               console.log("提案アイテムが抽出できなかったため、スキップします。");
               return;
             }
+            
+            console.log(`🔍 検証対象のパッケージ名: ${proposedItem}`);
 
-            // ==========================================
-            // 3. パッケージのブラックリストチェック (NEW!)
-            // ==========================================
+            // 3. パッケージのブラックリストチェック
             if (blacklistedPackages.includes(proposedItem)) {
               await closeAndComment(`🚫 提案された \`${proposedItem}\` はブラックリストに登録されているため、受け付けることができません。`, "OUTDATED");
               return;
             }
 
-            // ==========================================
-            // 4. 既存の trusted.json を読み込んで重複チェック (修正済)
-            // ==========================================
+            // 4. 既存の trusted.json を読み込んで重複チェック
             let isAlreadyTrusted = false;
             try {
-              // ファイルを文字列として読み込む
               const rawData = fs.readFileSync('trusted.json', 'utf8');
-              // 構造に関係なく、"パッケージ名" という独立した文字列としてJSON内に存在するかチェック
               isAlreadyTrusted = rawData.includes(`"${proposedItem}"`);
             } catch (err) {
-              console.log("trusted.json の読み込みに失敗しました（ファイルが存在しない可能性があります）:", err);
+              console.log("trusted.json の読み込みに失敗しました:", err);
             }
 
             if (isAlreadyTrusted) {
@@ -95,9 +87,7 @@ jobs:
               return;
             }
 
-            // ==========================================
             // 5. 承認待ち（既存のOpenなディスカッション）との重複チェック
-            // ==========================================
             const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} is:open is:discussion "${proposedItem}"`;
             const searchResult = await github.graphql(`
               query($searchQuery: String!) {
@@ -112,7 +102,6 @@ jobs:
               }
             `, { searchQuery });
 
-            // 自分自身を除外
             const duplicates = searchResult.search.nodes.filter(node => node.number !== discussion.number);
 
             if (duplicates.length > 0) {
