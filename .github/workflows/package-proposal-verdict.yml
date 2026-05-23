@@ -32,6 +32,7 @@ jobs:
                   nodes {
                     id
                     slug
+                    name
                   }
                 }
                 labels(first: 100) {
@@ -89,9 +90,8 @@ jobs:
                 }
               }
             }`;
-
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:${process.env.CATEGORY_SLUG} is:open -label:承認 -label:拒否`;
             
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:open -label:承認 -label:拒否`;
             let hasNextPage = true;
             let cursor = null;
             const allDiscussions = [];
