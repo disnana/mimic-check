@@ -1,12 +1,22 @@
 {
   "trusted_packages": [
+    {
+      "name": "requests",
+      "reason": "Popular HTTP library for Python with extensive documentation and community support.",
+      "date": "2026-05-23",
+      "verifiers": [
+        "github-actions"
+      ]
+    }
   ],
   "block_packages": [
     {
       "name": "reqeusts",
       "reason": "requestsのタイポを狙っており、悪意のあるコードが含まれている可能性が高い。",
       "date": "2026-05-23",
-      "verifiers": ["tp-li"]
+      "verifiers": [
+        "tp-li"
+      ]
     }
   ]
 }
