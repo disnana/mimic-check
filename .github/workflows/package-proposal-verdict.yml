@@ -2,14 +2,18 @@ name: "🛡️ Community Safety Consensus"
 
 on:
   schedule:
-    # 毎日夜22:00（日本時間）に自動実行 (UTC 13:00)
     - cron: '0 13 * * *'
-  workflow_dispatch: # 手動で即時実行したい時用
+  workflow_dispatch:
+
+# 以下の権限設定を書き足す
+permissions:
+  discussions: write # Discussionsの読み書き権限（後でClose等をするためwriteを推奨）
+  contents: read     # リポジトリ内のコードを読み取るための標準権限
 
 env:
-  REQUIRED_SCORE: 5        # 承認に必要な最低スコア (👍 - 👎)
-  COOLING_OFF_DAYS: 3      # 最低限公開しておく日数 (猶予期間)
-  CATEGORY_SLUG: "package-proposal" # 対象にするカテゴリのスラッグ
+  REQUIRED_SCORE: 5
+  COOLING_OFF_DAYS: 3
+  CATEGORY_SLUG: "package-proposal"
 
 jobs:
   check-proposals:
