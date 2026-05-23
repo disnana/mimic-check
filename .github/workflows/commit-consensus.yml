@@ -26,7 +26,7 @@ jobs:
             const fs = require('fs');
             const path = 'trusted.json';
 
-            // 1. カテゴリと「記録済み」ラベルのIDを取得
+            // 1. カテゴリと「追加済み」ラベルのIDを取得
             const repoInfoQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) {
@@ -52,14 +52,14 @@ jobs:
               return;
             }
 
-            const recordedLabel = labelsNodes.find(l => l.name === "記録済み");
+            const recordedLabel = labelsNodes.find(l => l.name === "追加済み");
             if (!recordedLabel) {
-              console.log("⚠️ 「記録済み」ラベルがリポジトリに見つかりません。あらかじめ作成しておいてください。");
+              console.log("⚠️ 「追加済み」ラベルがリポジトリに見つかりません。あらかじめ作成しておいてください。");
               return;
             }
 
-            // 2. 「承認」または「拒否」ラベルがあるが、まだ「記録済み」ではないものを検索
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:open (label:承認 OR label:拒否) -label:記録済み`;
+            // 2. 「承認」または「拒否」ラベルがあるが、まだ「追加済み」ではないものを検索
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:open (label:承認 OR label:拒否) -label:追加済み`;
             
             const discQuery = `query($searchQuery:String!, $cursor:String) {
               search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
@@ -111,7 +111,7 @@ jobs:
             // この処理を実行した主体（Bot名など）を verifiers に入れる
             const actorName = context.actor; 
 
-            // 4. データを分類して割り振り ＆ 「記録済み」ラベルを付与
+            // 4. データを分類して割り振り ＆ 「追加済み」ラベルを付与
             for (const discussion of targetDiscussions) {
               const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
               
@@ -131,7 +131,7 @@ jobs:
                 console.log(`❌ block_packages へ追加: ${newRecord.name}`);
               }
 
-              // GitHub側のディスカッションに「記録済み」ラベルを貼る
+              // GitHub側のディスカッションに「追加済み」ラベルを貼る
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
               }`, { id: discussion.id, labelId: recordedLabel.id });
