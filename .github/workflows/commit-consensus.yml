@@ -25,30 +25,38 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'trusted.json';
-
+            
+            // 1. カテゴリと「追加済み」ラベルのIDを取得
             const repoInfoQuery = `query($owner:String!, $name:String!) {
               repository(owner: $owner, name: $name) {
                 discussionCategories(first: 50) { nodes { slug name } }
                 labels(first: 100) { nodes { id name } }
               }
             }`;
-
+            
             const repoInfoResult = await github.graphql(repoInfoQuery, {
               owner: context.repo.owner,
               name: context.repo.repo
             });
-
+            
             const categories = repoInfoResult.repository.discussionCategories.nodes;
             const labelsNodes = repoInfoResult.repository.labels.nodes;
             const targetCategory = categories.find(c => c.slug === process.env.CATEGORY_SLUG);
-
-            if (!targetCategory) return;
-
-            const recordedLabel = labelsNodes.find(l => l.name === "記録済み");
-            if (!recordedLabel) return;
-
-            // すでにCloseされている（is:closed）もので、承認/拒否があり、記録済みではないものをスキャン
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" is:closed (label:承認 OR label:拒否) -label:記録済み`;
+            
+            if (!targetCategory) {
+              console.log(`❌ カテゴリ "${process.env.CATEGORY_SLUG}" が見つかりませんでした。`);
+              return;
+            }
+            
+            // ラベル名を「追加済み」に修正
+            const recordedLabel = labelsNodes.find(l => l.name === "追加済み");
+            if (!recordedLabel) {
+              console.log("⚠️ 「追加済み」ラベルがリポジトリに見つかりません。あらかじめ作成しておいてください。");
+              return;
+            }
+            
+            // 2. クローズ理由（RESOLVED / OUTDATED）を指定して「追加済み」がないものを検索
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} category:"${targetCategory.name}" reason:RESOLVED reason:OUTDATED -label:追加済み`;
             
             const discQuery = `query($searchQuery:String!, $cursor:String) {
               search(query: $searchQuery, type: DISCUSSION, first: 50, after: $cursor) {
@@ -63,23 +71,23 @@ jobs:
                 }
               }
             }`;
-
+            
             let hasNextPage = true;
             let cursor = null;
             const targetDiscussions = [];
-
+            
             while (hasNextPage) {
               const discResult = await github.graphql(discQuery, { searchQuery, cursor });
               targetDiscussions.push(...discResult.search.nodes);
               hasNextPage = discResult.search.pageInfo.hasNextPage;
               cursor = discResult.search.pageInfo.endCursor;
             }
-
+            
             if (targetDiscussions.length === 0) {
               console.log("本日新しく記録すべき確定済みの提案はありません。");
               return;
             }
-
+            
             let stateData = { trusted_packages: [], block_packages: [] };
             if (fs.existsSync(path)) {
               try {
@@ -88,27 +96,24 @@ jobs:
                 stateData = { trusted_packages: [], block_packages: [] };
               }
             }
-
+            
             const todayStr = new Date().toISOString().split('T')[0];
-
-            // 本文から特定のセクションの中身を抜き出す関数
+            
             function extractSection(body, headerName) {
               const regex = new RegExp(`###\\s+${headerName}\\s+([\\s\\S]*?)(?=###|$)`, 'i');
               const match = body.match(regex);
               return match ? match[1].trim() : "";
             }
-
+            
             for (const discussion of targetDiscussions) {
               const body = discussion.body || "";
               
-              // テンプレートからデータを抽出
               let pkgName = extractSection(body, "パッケージ名");
               let reason = extractSection(body, "理由");
-
-              // 万が一テンプレートが崩れてパースできなかった場合のフォールバック
+            
               if (!pkgName) pkgName = `unknown-discussions-${discussion.number}`;
               if (!reason) reason = `Discussion #${discussion.number} で合意された処理。`;
-
+            
               const isApproved = discussion.labels.nodes.some(l => l.name === "承認");
               
               const newRecord = {
@@ -117,7 +122,7 @@ jobs:
                 date: todayStr,
                 verifiers: ["github-actions"]
               };
-
+            
               if (isApproved) {
                 stateData.trusted_packages.push(newRecord);
                 console.log(`📝 trusted.json に追加 (Trusted): ${pkgName}`);
@@ -125,13 +130,13 @@ jobs:
                 stateData.block_packages.push(newRecord);
                 console.log(`📝 trusted.json に追加 (Block): ${pkgName}`);
               }
-
-              // 処理が終わったら「記録済み」を貼る
+            
+              // 処理が終わったら「追加済み」ラベルを貼る
               await github.graphql(`mutation($id:ID!, $labelId:ID!) {
                 addLabelsToLabelable(input: {labelableId: $id, labelIds: [$labelId]}) { clientMutationId }
               }`, { id: discussion.id, labelId: recordedLabel.id });
             }
-
+            
             fs.writeFileSync(path, JSON.stringify(stateData, null, 2), 'utf8');
 
       - name: Commit and Push changes
