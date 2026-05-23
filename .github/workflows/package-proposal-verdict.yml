@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 env:
-  REQUIRED_SCORE: 5
-  COOLING_OFF_DAYS: 3
+  COOLING_OFF_DAYS: ${{ vars.COOLING_OFF_DAYS }}
+  REQUIRED_SCORE: ${{ vars.REQUIRED_SCORE }}
   CATEGORY_SLUG: "package-proposal"
 
 jobs:
